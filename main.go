@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -38,12 +37,12 @@ func main(){
 		qualityOfServicePacketLossRate := promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "quality_of_service_packet_loss_rate",
 			Help: "The rate of Packet Loss",
-		}, []string{"SourceIP", "DestinationIP", "Timestamp"});
+		}, []string{"SourceIP", "DestinationIP"});
 
 		qualityOfServiceQueueingDelay := promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "quality_of_service_queueing_delay_millisecond",
 			Help: "The duration of queueing delay (in millisecond)",
-		}, []string{"SourceIP", "DestinationIP", "Timestamp"});
+		}, []string{"SourceIP", "DestinationIP"});
 
 		host := os.Args[1]
 		ips, err := net.LookupIP(host)
@@ -66,13 +65,11 @@ func main(){
 			qualityOfServiceQueueingDelay.With(prometheus.Labels{
 				"SourceIP":      "192.168.43.11",
 				"DestinationIP":  ipAddr.String(),
-				"Timestamp":     strconv.FormatInt(time.Now().UnixMilli(), 10),
 			}).Set(rttTime * 1000)
 			
 			qualityOfServicePacketLossRate.With(prometheus.Labels{
 				"SourceIP":      "192.168.43.11",
 				"DestinationIP":  ipAddr.String(),
-				"Timestamp":     strconv.FormatInt(time.Now().UnixMilli(), 10),
 			}).Set(0)
 
 			time.Sleep(500 * time.Millisecond)
