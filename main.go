@@ -19,7 +19,7 @@ func AverageDeque(deque deque.Deque[bool]) float64 {
 	sum := 0.0
 
 	for i := 0; i < deque.Len(); i++ {
-		if deque.At(i) == true {
+		if deque.At(i) {
 			sum += 1.0
 		}
 	}
