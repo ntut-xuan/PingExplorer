@@ -29,7 +29,7 @@ func AverageDeque(deque deque.Deque[bool]) float64 {
 
 func main() {
 
-	if len(os.Args) != 2 {
+	if len(os.Args) <= 2 {
 		fmt.Println("Usage: go run ping.go <host>")
 		os.Exit(1)
 	}
@@ -43,93 +43,108 @@ func main() {
 		http.ListenAndServe(":2112", nil)
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	qualityOfServicePacketLossRate := promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "quality_of_service_packet_loss_rate",
+		Help: "The rate of Packet Loss",
+	}, []string{"SourceIP", "DestinationIP"})
 
-		qualityOfServicePacketLossRate := promauto.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "quality_of_service_packet_loss_rate",
-			Help: "The rate of Packet Loss",
-		}, []string{"SourceIP", "DestinationIP"})
+	qualityOfServiceQueueingDelay := promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "quality_of_service_queueing_delay_millisecond",
+		Help: "The duration of queueing delay (in millisecond)",
+	}, []string{"SourceIP", "DestinationIP"})
 
-		qualityOfServiceQueueingDelay := promauto.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "quality_of_service_queueing_delay_millisecond",
-			Help: "The duration of queueing delay (in millisecond)",
-		}, []string{"SourceIP", "DestinationIP"})
+	qualityOfServiceSmoothRTT := promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "quality_of_service_smooth_RTT_millisecond",
+		Help: "Smooth RTT of queueing delay (in millisecond)",
+	}, []string{"SourceIP", "DestinationIP"})
 
-		qualityOfServiceSmoothRTT := promauto.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "quality_of_service_smooth_RTT_millisecond",
-			Help: "Smooth RTT of queueing delay (in millisecond)",
-		}, []string{"SourceIP", "DestinationIP"})
+	var packetLossSamplesLists [20]deque.Deque[bool]
+	var rttSumList [20]float64
+	var rttCountList [20]float64
+	var hostList [20]string
+	var ipAddrList [20]net.IP
 
-		host := os.Args[1]
+	fmt.Printf("Have %d hosts\n", len(os.Args) - 1)
+
+	for host_index := 0; host_index < (len(os.Args) - 1); host_index++ {
+		host := os.Args[1+host_index]
 		ips, err := net.LookupIP(host)
 		if err != nil {
 			fmt.Printf("Error resolving host: %v\n", err)
 			os.Exit(1)
 		}
+		hostList[host_index] = host
+		ipAddrList[host_index] = ips[0]
+	}
 
-		ipAddr := ips[0]
-		fmt.Printf("Pinging %s [%s]:\n", os.Args[1], ipAddr)
+	var lock sync.Mutex
 
-		rttSum := 0.0
-		rttCount := 0
-		var packet_loss_samples deque.Deque[bool]
+	for host_index := 0; host_index < (len(os.Args) - 1); host_index++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			
+			fmt.Printf("Pinging %s [%s]:\n", os.Args[1+host_index], ipAddrList[host_index])
 
-		for i := 0; ; i++ {
-			rttTime, err := ping.Ping(ipAddr, i)
+			for i := 0; ; i++ {
+				lock.Lock()
 
-			if err != nil {
-				rttSum += 100
-				rttCount += 1
-				packet_loss_samples.PushBack(true)
+				rttTime, err := ping.Ping(ipAddrList[host_index], i)
 
-				if packet_loss_samples.Len() >= 30 {
-					packet_loss_samples.PopFront()
+				if err != nil {
+					rttSumList[host_index] += 100
+					rttCountList[host_index] += 1
+					packetLossSamplesLists[host_index].PushBack(true)
+
+					if packetLossSamplesLists[host_index].Len() >= 30 {
+						packetLossSamplesLists[host_index].PopFront()
+					}
+
+					qualityOfServiceQueueingDelay.With(prometheus.Labels{
+						"SourceIP":      hostList[host_index],
+						"DestinationIP": ipAddrList[host_index].String(),
+					}).Set(100)
+
+					qualityOfServiceSmoothRTT.With(prometheus.Labels{
+						"SourceIP":      hostList[host_index],
+						"DestinationIP": ipAddrList[host_index].String(),
+					}).Set(0.75*rttSumList[host_index]/float64(rttCountList[host_index]) + 0.25*rttTime*1000)
+
+					qualityOfServicePacketLossRate.With(prometheus.Labels{
+						"SourceIP":      hostList[host_index],
+						"DestinationIP": ipAddrList[host_index].String(),
+					}).Set(AverageDeque(packetLossSamplesLists[host_index]))
+				} else {
+					rttSumList[host_index] += (rttTime * 1000)
+					rttCountList[host_index] += 1
+					packetLossSamplesLists[host_index].PushBack(false)
+
+					if packetLossSamplesLists[host_index].Len() >= 30 {
+						packetLossSamplesLists[host_index].PopFront()
+					}
+
+					qualityOfServiceQueueingDelay.With(prometheus.Labels{
+						"SourceIP":      hostList[host_index],
+						"DestinationIP": ipAddrList[host_index].String(),
+					}).Set(rttTime * 1000)
+
+					qualityOfServiceSmoothRTT.With(prometheus.Labels{
+						"SourceIP":      hostList[host_index],
+						"DestinationIP": ipAddrList[host_index].String(),
+					}).Set(0.75*rttSumList[host_index]/float64(rttCountList[host_index]) + 0.25*rttTime*1000)
+
+					qualityOfServicePacketLossRate.With(prometheus.Labels{
+						"SourceIP":      hostList[host_index],
+						"DestinationIP": ipAddrList[host_index].String(),
+					}).Set(AverageDeque(packetLossSamplesLists[host_index]))
 				}
 
-				qualityOfServiceQueueingDelay.With(prometheus.Labels{
-					"SourceIP":      host,
-					"DestinationIP": ipAddr.String(),
-				}).Set(100)
+				lock.Unlock()
 
-				qualityOfServiceSmoothRTT.With(prometheus.Labels{
-					"SourceIP":      host,
-					"DestinationIP": ipAddr.String(),
-				}).Set(0.75*rttSum/float64(rttCount) + 0.25*rttTime*1000)
-
-				qualityOfServicePacketLossRate.With(prometheus.Labels{
-					"SourceIP":      host,
-					"DestinationIP": ipAddr.String(),
-				}).Set(AverageDeque(packet_loss_samples))
-			} else {
-				rttSum += (rttTime * 1000)
-				rttCount += 1
-				packet_loss_samples.PushBack(false)
-
-				if packet_loss_samples.Len() >= 30 {
-					packet_loss_samples.PopFront()
-				}
-
-				qualityOfServiceQueueingDelay.With(prometheus.Labels{
-					"SourceIP":      host,
-					"DestinationIP": ipAddr.String(),
-				}).Set(rttTime * 1000)
-
-				qualityOfServiceSmoothRTT.With(prometheus.Labels{
-					"SourceIP":      host,
-					"DestinationIP": ipAddr.String(),
-				}).Set(0.75*rttSum/float64(rttCount) + 0.25*rttTime*1000)
-
-				qualityOfServicePacketLossRate.With(prometheus.Labels{
-					"SourceIP":      host,
-					"DestinationIP": ipAddr.String(),
-				}).Set(AverageDeque(packet_loss_samples))
+				time.Sleep(100 * time.Millisecond)
 			}
-
-			time.Sleep(100 * time.Millisecond)
-		}
-	}()
+		}()
+	}
 
 	wg.Wait()
 }
